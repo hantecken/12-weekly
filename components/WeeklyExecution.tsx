@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { AppState, TaskStatus, Tactic, WeekData } from '../types';
-import { initiateGoogleAuth, createCalendarEvent } from '../services/calendarService';
+import { initGoogleServices, signInToGoogle, signOutFromGoogle, createCalendarEvent, configureGoogleCredentials } from '../services/calendarService';
 import { initializeWeek } from '../services/storage';
 import { Icons } from './Icons';
 
@@ -12,7 +12,25 @@ interface WeeklyExecutionProps {
 const WeeklyExecution: React.FC<WeeklyExecutionProps> = ({ state, updateState }) => {
   const [loadingCalendar, setLoadingCalendar] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
-  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [isServicesReady, setIsServicesReady] = useState(false);
+  
+  // Settings Modal State
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [clientIdInput, setClientIdInput] = useState(state.googleClientId || '');
+  const [apiKeyInput, setApiKeyInput] = useState(state.googleApiKey || '');
+
+  // Initialize Google Services on mount or when keys change
+  useEffect(() => {
+    const init = async () => {
+      // Configure with saved keys from state if available
+      if (state.googleClientId && state.googleApiKey) {
+        configureGoogleCredentials(state.googleClientId, state.googleApiKey);
+      }
+      await initGoogleServices();
+      setIsServicesReady(true);
+    };
+    init();
+  }, [state.googleClientId, state.googleApiKey]);
 
   // Ensure we have a current week object
   useEffect(() => {
@@ -28,32 +46,49 @@ const WeeklyExecution: React.FC<WeeklyExecutionProps> = ({ state, updateState })
 
   const currentWeekData = state.weeks.find(w => w.weekNumber === state.currentWeek);
 
-  const handleInitiateConnection = () => {
-    setShowAuthModal(true);
+  const handleConnectClick = () => {
+    // 如果沒有設定金鑰，優先開啟設定視窗引導使用者
+    if (!state.googleClientId || !state.googleApiKey) {
+      setIsSettingsOpen(true);
+    } else {
+      handleConnectCalendar();
+    }
   };
 
-  const handleAccountSelect = async (email: string) => {
-    setShowAuthModal(false);
-    setLoadingCalendar(true);
-    
-    // Simulate API handshake
-    const success = await initiateGoogleAuth();
-    
-    if (success) {
-      updateState({ 
-        ...state, 
-        isCalendarConnected: true,
-        connectedEmail: email 
-      });
-      showNotification(`已連結 Google 日曆帳戶: ${email}`);
-    } else {
-      showNotification("連結失敗，請稍後再試", true);
+  const handleConnectCalendar = async (forceDemo = false) => {
+    if (!isServicesReady && !forceDemo) {
+      showNotification("服務初始化中，請稍候...", true);
+      return;
     }
-    setLoadingCalendar(false);
+
+    setLoadingCalendar(true);
+    try {
+      // 如果強制模擬，我們不呼叫真實的 signIn
+      const email = await signInToGoogle(); 
+      if (email) {
+        updateState({ 
+          ...state, 
+          isCalendarConnected: true,
+          connectedEmail: email 
+        });
+        
+        if (email.includes("(模擬帳號)")) {
+           showNotification(`[模擬模式] 已連結: ${email}`);
+        } else {
+           showNotification(`成功連結 Google 帳戶: ${email}`);
+        }
+      }
+    } catch (error) {
+      showNotification("連結失敗或使用者取消。", true);
+      console.error(error);
+    } finally {
+      setLoadingCalendar(false);
+    }
   };
 
   const handleDisconnectCalendar = () => {
     if(window.confirm("確定要取消連結 Google 日曆嗎？")) {
+      signOutFromGoogle();
       updateState({
         ...state,
         isCalendarConnected: false,
@@ -61,6 +96,26 @@ const WeeklyExecution: React.FC<WeeklyExecutionProps> = ({ state, updateState })
       });
       showNotification("已取消連結");
     }
+  };
+
+  const handleSaveSettings = () => {
+    updateState({
+      ...state,
+      googleClientId: clientIdInput.trim(),
+      googleApiKey: apiKeyInput.trim(),
+      // Reset connection when keys change to force re-auth
+      isCalendarConnected: false,
+      connectedEmail: null
+    });
+    setIsSettingsOpen(false);
+    showNotification("API 設定已儲存，請重新連結日曆");
+  };
+
+  const handleUseDemoMode = () => {
+    setIsSettingsOpen(false);
+    // 清空金鑰設定以確保進入模擬模式
+    configureGoogleCredentials('', ''); 
+    handleConnectCalendar(true);
   };
 
   const pushToCalendar = async (tactic: Tactic) => {
@@ -78,7 +133,7 @@ const WeeklyExecution: React.FC<WeeklyExecutionProps> = ({ state, updateState })
     
     const endTime = new Date(tomorrow.getTime() + tactic.durationMinutes * 60000);
 
-    await createCalendarEvent({
+    const success = await createCalendarEvent({
       summary: `策略時間: ${tactic.title}`,
       description: `12 Week Year 目標執行時段。\n\n任務: ${tactic.title}`,
       startDateTime: tomorrow.toISOString(),
@@ -86,7 +141,15 @@ const WeeklyExecution: React.FC<WeeklyExecutionProps> = ({ state, updateState })
       colorId: '11' // Red for Strategy
     });
 
-    showNotification(`已將 "${tactic.title}" 排程至日曆 (模擬)`);
+    if (success) {
+      if (state.connectedEmail?.includes("(模擬帳號)")) {
+         showNotification(`[模擬] 已將 "${tactic.title}" 排程 (不會真的寫入 Google)`);
+      } else {
+         showNotification(`已將 "${tactic.title}" 排程至您的 Google 日曆`);
+      }
+    } else {
+      showNotification("寫入日曆失敗，請檢查授權狀態或 API 設定。", true);
+    }
     setLoadingCalendar(false);
   };
 
@@ -129,72 +192,83 @@ const WeeklyExecution: React.FC<WeeklyExecutionProps> = ({ state, updateState })
   return (
     <div className="space-y-6 pb-20 relative">
       {notification && (
-        <div className="fixed top-4 right-4 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg z-50 animate-fade-in">
+        <div className={`fixed top-4 right-4 px-4 py-2 rounded-lg shadow-lg z-50 animate-fade-in ${notification.includes('失敗') ? 'bg-red-600 text-white' : 'bg-gray-900 text-white'}`}>
           {notification}
         </div>
       )}
 
-      {/* Mock Google Account Chooser Modal */}
-      {showAuthModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden">
-            <div className="p-6 pb-4 border-b border-gray-100">
-              <div className="flex justify-center mb-4">
-                <span className="text-2xl font-bold text-gray-700">Google</span>
+      {/* Settings Modal */}
+      {isSettingsOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-gray-100 flex items-center justify-between">
+              <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+                <Icons.Settings className="w-5 h-5" />
+                Google API 設定
+              </h2>
+              <button onClick={() => setIsSettingsOpen(false)} className="text-gray-400 hover:text-gray-600">
+                <Icons.Close className="w-6 h-6" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="bg-blue-50 p-4 rounded-lg text-sm text-blue-800 space-y-2">
+                <p className="font-bold">如何啟用真實 Google 日曆整合？</p>
+                <ol className="list-decimal ml-4 space-y-1">
+                  <li>前往 <a href="https://console.cloud.google.com/" target="_blank" rel="noreferrer" className="underline">Google Cloud Console</a> 並建立新專案。</li>
+                  <li>在「API 和服務」啟用 <b>Google Calendar API</b>。</li>
+                  <li>建立「OAuth 用戶端 ID」(應用程式類型選 <b>Web 應用程式</b>)。</li>
+                  <li>
+                    <span className="text-red-600 font-bold">必要：</span>
+                    在「已授權的 JavaScript 來源」加入：<code>{window.location.origin}</code>
+                  </li>
+                  <li>將 <b>Client ID</b> 與 <b>API Key</b> 填入下方。</li>
+                </ol>
+                <p className="mt-2 text-xs text-blue-600">若無金鑰，您仍可使用模擬模式體驗流程。</p>
               </div>
-              <h3 className="text-center text-lg font-medium text-gray-800">選擇帳戶</h3>
-              <p className="text-center text-sm text-gray-500 mt-1">以繼續使用 12WY PVS 系統</p>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Google Client ID</label>
+                <input 
+                  type="text" 
+                  value={clientIdInput}
+                  onChange={(e) => setClientIdInput(e.target.value)}
+                  placeholder="例如: 123456789-abcde.apps.googleusercontent.com"
+                  className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Google API Key</label>
+                <input 
+                  type="text" 
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder="AIzaSy..."
+                  className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
             </div>
-            
-            <div className="divide-y divide-gray-100">
-              {/* Mock Account 1 */}
+            <div className="p-6 border-t border-gray-100 flex justify-between items-center">
               <button 
-                onClick={() => handleAccountSelect('demo.user@gmail.com')}
-                className="w-full px-6 py-4 flex items-center gap-4 hover:bg-gray-50 transition-colors text-left"
+                onClick={handleUseDemoMode}
+                className="text-sm text-gray-500 hover:text-indigo-600 underline"
               >
-                <div className="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-bold">
-                  D
-                </div>
-                <div>
-                  <div className="font-medium text-gray-900">Demo User</div>
-                  <div className="text-sm text-gray-500">demo.user@gmail.com</div>
-                </div>
+                略過設定，使用模擬模式
               </button>
-
-              {/* Mock Account 2 */}
-              <button 
-                onClick={() => handleAccountSelect('business.planner@company.com')}
-                className="w-full px-6 py-4 flex items-center gap-4 hover:bg-gray-50 transition-colors text-left"
-              >
-                <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center text-green-700 font-bold">
-                  B
-                </div>
-                <div>
-                  <div className="font-medium text-gray-900">Business Planner</div>
-                  <div className="text-sm text-gray-500">business.planner@company.com</div>
-                </div>
-              </button>
-
-              {/* Use another account */}
-              <button 
-                className="w-full px-6 py-4 flex items-center gap-4 hover:bg-gray-50 transition-colors text-left"
-                onClick={() => handleAccountSelect('custom.user@example.com')}
-              >
-                <div className="w-10 h-10 rounded-full flex items-center justify-center text-gray-500">
-                  <Icons.User className="w-6 h-6" />
-                </div>
-                <div className="font-medium text-gray-700">使用其他帳戶</div>
-              </button>
-            </div>
-
-            <div className="p-4 border-t border-gray-100 text-xs text-gray-500 text-center">
-              <p className="mb-2">如繼續操作，即表示 Google 將與 12WY PVS 分享您的姓名、電子郵件地址和個人資料相片。</p>
-              <button 
-                onClick={() => setShowAuthModal(false)}
-                className="px-4 py-2 text-gray-600 font-medium hover:bg-gray-100 rounded-md transition-colors"
-              >
-                取消
-              </button>
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
+                >
+                  取消
+                </button>
+                <button 
+                  onClick={handleSaveSettings}
+                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+                >
+                  儲存並啟用
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -206,32 +280,46 @@ const WeeklyExecution: React.FC<WeeklyExecutionProps> = ({ state, updateState })
           <p className="text-gray-500">為您的策略安排時間方塊並執行。</p>
         </div>
         
-        {!state.isCalendarConnected ? (
-           <button 
-             onClick={handleInitiateConnection}
-             disabled={loadingCalendar}
-             className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors shadow-sm"
-           >
-             <Icons.GoogleCalendar className="w-5 h-5 text-blue-500" />
-             {loadingCalendar ? '連結中...' : '連結 Google 日曆'}
-           </button>
-        ) : (
-          <div className="flex items-center gap-3">
-             <div className="hidden md:block text-right">
-                <div className="text-xs text-gray-400">已連結</div>
-                <div className="text-sm font-medium text-gray-700">{state.connectedEmail}</div>
-             </div>
+        <div className="flex items-center gap-2">
+          {/* Settings Button */}
+          <button
+            onClick={() => setIsSettingsOpen(true)}
+            className="p-2 text-gray-500 hover:bg-gray-100 hover:text-gray-700 rounded-lg border border-transparent hover:border-gray-200 transition-colors"
+            title="設定 Google API 金鑰"
+          >
+            <Icons.Settings className="w-5 h-5" />
+          </button>
+
+          {!state.isCalendarConnected ? (
              <button 
-              onClick={handleDisconnectCalendar}
-              className="flex items-center gap-2 text-sm text-green-600 bg-green-50 px-3 py-2 rounded-lg border border-green-200 hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-all group"
-              title="點擊以中斷連結"
-            >
-              <div className="w-2 h-2 bg-green-500 rounded-full group-hover:bg-red-500"></div>
-              <span className="group-hover:hidden">已連結日曆</span>
-              <span className="hidden group-hover:inline">中斷連結</span>
-            </button>
-          </div>
-        )}
+               onClick={handleConnectClick}
+               disabled={loadingCalendar}
+               className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors shadow-sm"
+             >
+               <Icons.GoogleCalendar className="w-5 h-5 text-blue-500" />
+               {loadingCalendar ? '連結中...' : '連結 Google 日曆'}
+             </button>
+          ) : (
+            <div className="flex items-center gap-3">
+               <div className="hidden md:block text-right">
+                  <div className="text-xs text-gray-400">已連結帳戶</div>
+                  <div className="text-sm font-medium text-gray-700 flex items-center gap-1 justify-end">
+                     <Icons.User className="w-3 h-3" />
+                     {state.connectedEmail}
+                  </div>
+               </div>
+               <button 
+                onClick={handleDisconnectCalendar}
+                className="flex items-center gap-2 text-sm text-green-600 bg-green-50 px-3 py-2 rounded-lg border border-green-200 hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-all group"
+                title="點擊以中斷連結"
+              >
+                <div className="w-2 h-2 bg-green-500 rounded-full group-hover:bg-red-500"></div>
+                <span className="group-hover:hidden">已連結</span>
+                <span className="hidden group-hover:inline">中斷連結</span>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="grid gap-4">
@@ -272,10 +360,10 @@ const WeeklyExecution: React.FC<WeeklyExecutionProps> = ({ state, updateState })
                     ? 'text-gray-300 cursor-not-allowed'
                     : 'text-indigo-600 bg-indigo-50 hover:bg-indigo-100'
                 }`}
-                title="新增至日曆作為策略時間"
+                title={state.connectedEmail?.includes("(模擬") ? "模擬寫入日曆" : "新增至真實 Google 日曆"}
               >
                 <Icons.GoogleCalendar className="w-4 h-4" />
-                <span className="hidden sm:inline">排程</span>
+                <span className="hidden sm:inline">寫入日曆</span>
               </button>
             </div>
           </div>
@@ -288,13 +376,21 @@ const WeeklyExecution: React.FC<WeeklyExecutionProps> = ({ state, updateState })
         )}
       </div>
 
-      <div className="bg-blue-50 border border-blue-100 rounded-lg p-4">
-        <h4 className="text-sm font-bold text-blue-800 mb-2 flex items-center gap-2">
+      <div className={`border rounded-lg p-4 ${state.connectedEmail?.includes("模擬") ? "bg-blue-50 border-blue-100" : "bg-green-50 border-green-100"}`}>
+        <h4 className={`text-sm font-bold mb-2 flex items-center gap-2 ${state.connectedEmail?.includes("模擬") ? "text-blue-800" : "text-green-800"}`}>
           <Icons.Alert className="w-4 h-4" /> 
-          12 Week Year 提示
+          {state.connectedEmail?.includes("模擬") ? "目前為模擬/演示模式" : "Google Calendar 功能已啟用"}
         </h4>
-        <p className="text-sm text-blue-700">
-          儘早在一週的開始安排您的<strong>策略方塊 (Strategy Blocks)</strong>。如果您錯過了，請在同一週內重新安排，不要延後到下一週。
+        <p className={`text-sm ${state.connectedEmail?.includes("模擬") ? "text-blue-700" : "text-green-700"}`}>
+          {state.connectedEmail?.includes("模擬") ? (
+             <span>
+               目前使用模擬帳號。若要啟用真實 Google 日曆寫入功能，請點擊上方「連結 Google 日曆」或<b>設定圖示</b>輸入 API 金鑰。
+             </span>
+          ) : (
+             <span>
+               您已設定有效的 API 金鑰。點擊「寫入日曆」將會真實地在您的 Google 日曆上建立活動（預設時間為明天）。
+             </span>
+          )}
         </p>
       </div>
     </div>

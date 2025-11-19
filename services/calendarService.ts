@@ -1,8 +1,31 @@
 import { CalendarEventConfig } from '../types';
 
-// NOTE: In a real production app, this would use gapi.client.calendar and OAuth2.
-// Since we cannot provision a real Client ID for this generated code,
-// we will mock the successful interaction and log the payloads.
+// Default fallback environment variables (if any)
+const ENV_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || ''; 
+const ENV_API_KEY = process.env.GOOGLE_API_KEY || '';
+
+// Mutable configuration variables
+let currentClientId = ENV_CLIENT_ID;
+let currentApiKey = ENV_API_KEY;
+
+const DISCOVERY_DOCS = [
+  'https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest',
+  'https://www.googleapis.com/discovery/v1/apis/oauth2/v2/rest'
+];
+const SCOPES = 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.email';
+
+declare global {
+  interface Window {
+    gapi: any;
+    google: any;
+  }
+}
+
+let tokenClient: any;
+let gapiInited = false;
+let gisInited = false;
+// 新增：模擬模式旗標
+let isDemoMode = false;
 
 export const CALENDAR_COLORS = {
   STRATEGY: '11', // Red
@@ -10,35 +33,171 @@ export const CALENDAR_COLORS = {
   BREAKOUT: '1'   // Lavender
 };
 
-export const initiateGoogleAuth = async (): Promise<boolean> => {
-  console.log("Initiating Google Auth...");
-  // Mocking a delay
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  console.log("Google Auth Successful (Mock)");
-  return true;
+/**
+ * Sets the API credentials dynamically from the UI
+ */
+export const configureGoogleCredentials = (clientId: string, apiKey: string) => {
+  currentClientId = clientId;
+  currentApiKey = apiKey;
+  // Reset initialization flags to force re-init with new keys
+  gapiInited = false;
+  gisInited = false;
+  isDemoMode = false; // Assume intention to use real mode
+};
+
+/**
+ * Initializes the Google API client and the Identity Services client.
+ */
+export const initGoogleServices = async (): Promise<void> => {
+  // Check keys. logic: if no dynamic keys and no env keys, demo mode.
+  if (!currentClientId || !currentApiKey) {
+    console.warn("Google Client ID or API Key missing. Initializing in DEMO/SIMULATION MODE.");
+    isDemoMode = true;
+    return Promise.resolve();
+  }
+
+  isDemoMode = false;
+
+  return new Promise((resolve) => {
+    const checkLibs = setInterval(() => {
+      if (window.gapi && window.google) {
+        clearInterval(checkLibs);
+        initializeGapiClient();
+        initializeGisClient();
+        resolve();
+      }
+    }, 100);
+  });
+};
+
+const initializeGapiClient = async () => {
+  try {
+    await window.gapi.client.init({
+      apiKey: currentApiKey,
+      discoveryDocs: DISCOVERY_DOCS,
+    });
+    gapiInited = true;
+  } catch (error) {
+    console.error("Error initializing GAPI client:", error);
+    // If initialization fails (e.g. bad key), fall back to demo mode to prevent app crash
+    isDemoMode = true; 
+  }
+};
+
+const initializeGisClient = () => {
+  try {
+    tokenClient = window.google.accounts.oauth2.initTokenClient({
+      client_id: currentClientId,
+      scope: SCOPES,
+      callback: '', // defined later
+    });
+    gisInited = true;
+  } catch (error) {
+    console.error("Error initializing GIS client:", error);
+    isDemoMode = true;
+  }
+};
+
+/**
+ * Triggers the Google Sign-In popup flow.
+ * Returns the user's email if successful.
+ */
+export const signInToGoogle = async (): Promise<string | null> => {
+  // 模擬模式處理
+  if (isDemoMode) {
+    console.log("Simulating Google Login...");
+    await new Promise(resolve => setTimeout(resolve, 1000)); // 模擬網路延遲
+    return "demo.user@example.com (模擬帳號)";
+  }
+
+  // Try to re-init if needed
+  if (!gapiInited || !gisInited) {
+    await initGoogleServices();
+    if (isDemoMode) {
+       // If still demo mode after retry, return demo user
+       return "demo.user@example.com (模擬帳號)"; 
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    if (!tokenClient) {
+      reject("Google Token Client not initialized");
+      return;
+    }
+
+    tokenClient.callback = async (resp: any) => {
+      if (resp.error) {
+        reject(resp);
+        return;
+      }
+      
+      try {
+        const userInfo = await window.gapi.client.oauth2.userinfo.get();
+        resolve(userInfo.result.email);
+      } catch (e) {
+        console.error("Failed to fetch user info", e);
+        resolve("Google User");
+      }
+    };
+
+    if (window.gapi.client.getToken() === null) {
+      tokenClient.requestAccessToken({ prompt: 'consent' });
+    } else {
+      tokenClient.requestAccessToken({ prompt: '' });
+    }
+  });
+};
+
+/**
+ * Signs out by revoking the token.
+ */
+export const signOutFromGoogle = () => {
+  if (isDemoMode) {
+    console.log("Simulating Google Logout...");
+    return;
+  }
+
+  const token = window.gapi.client.getToken();
+  if (token !== null) {
+    window.google.accounts.oauth2.revoke(token.access_token);
+    window.gapi.client.setToken('');
+  }
 };
 
 export const createCalendarEvent = async (event: CalendarEventConfig): Promise<boolean> => {
-  console.log("Creating Google Calendar Event...", event);
-  
-  // Constructing the gapi payload structure for reference
-  const gapiPayload = {
-    summary: `[12WY] ${event.summary}`,
-    description: `${event.description}\n\nGenerated by 12WY-PVS`,
-    start: {
-      dateTime: event.startDateTime,
-      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    },
-    end: {
-      dateTime: event.endDateTime,
-      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    },
-    colorId: event.colorId || CALENDAR_COLORS.STRATEGY,
-  };
+  // 模擬模式處理
+  if (isDemoMode) {
+    console.log("[Demo Mode] Creating Calendar Event:", event);
+    await new Promise(resolve => setTimeout(resolve, 800));
+    // 可以在這裡 alert 告訴使用者現在是模擬模式
+    return true;
+  }
 
-  // In a real app: await gapi.client.calendar.events.insert({ calendarId: 'primary', resource: gapiPayload });
-  
-  await new Promise(resolve => setTimeout(resolve, 800)); // Mock network request
-  console.log("Event Created Payload:", gapiPayload);
-  return true;
+  if (!window.gapi.client.getToken()) {
+    console.error("No access token set.");
+    return false;
+  }
+
+  try {
+    await window.gapi.client.calendar.events.insert({
+      'calendarId': 'primary',
+      'resource': {
+        summary: `[12WY] ${event.summary}`,
+        description: `${event.description}\n\nGenerated by 12WY-PVS`,
+        start: {
+          dateTime: event.startDateTime,
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        },
+        end: {
+          dateTime: event.endDateTime,
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        },
+        colorId: event.colorId || CALENDAR_COLORS.STRATEGY,
+      },
+    });
+    return true;
+  } catch (error) {
+    console.error("Error creating calendar event:", error);
+    return false;
+  }
 };

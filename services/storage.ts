@@ -10,13 +10,17 @@ const INITIAL_STATE: AppState = {
   isCalendarConnected: false,
   connectedEmail: null,
   startDate: new Date().toISOString(),
+  googleClientId: '',
+  googleApiKey: ''
 };
 
 export const loadState = (): AppState => {
   try {
     const serialized = localStorage.getItem(STORAGE_KEY);
     if (!serialized) return INITIAL_STATE;
-    return JSON.parse(serialized);
+    const parsed = JSON.parse(serialized);
+    // Merge with initial state to ensure new fields exist if loading old data
+    return { ...INITIAL_STATE, ...parsed };
   } catch (e) {
     console.error("Failed to load state", e);
     return INITIAL_STATE;

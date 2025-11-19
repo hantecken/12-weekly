@@ -38,6 +38,9 @@ export interface AppState {
   isCalendarConnected: boolean;
   connectedEmail?: string | null; // The email of the connected Google account
   startDate: string; // The start of the 12 week cycle
+  // User provided credentials
+  googleClientId?: string;
+  googleApiKey?: string;
 }
 
 export interface CalendarEventConfig {
